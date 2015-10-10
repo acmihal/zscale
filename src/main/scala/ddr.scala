@@ -53,25 +53,38 @@ class HASTIDDR extends Module with HASTIConstants
     // Never respond with an error
     io.in.hresp := HRESP_OKAY
 
-    // Read data out connects directly to the read fifo
-    io.in.hrdata := io.out.rd.data
+    // Read data out is the registered output of the read fifo
+    val rdata = Reg(next = io.out.rd.data)
+    io.in.hrdata := rdata
 
     // Write data in connects directly to the write fifo
     io.out.wr.data := io.in.hwdata
-    io.out.wr.mask := UInt(0) // write every byte
 
     // Register the command to be sent to the ddr controller
     val cmden = Reg(init = Bool(false))
     val wren = Reg(init = Bool(false))
     val rden = Reg(init = Bool(false))
     val instr = Reg(init = DDRINSTR_WRITE)
-    val bl = Reg(init = UInt(0, width=6))        // Keep the burst length at 1 word.
     val byte_addr = Reg(init = UInt(0, width=30))
+    val wsize = Reg(UInt(width = SZ_HSIZE))
+
+    // Keep the burst length at 1 word.
+    val bl = Reg(init = UInt(0, width=6))
+
+    // Zero-out the two lsbs of the address.
+    io.out.cmd.byte_addr := Cat(byte_addr(29, 2), UInt(0, width=2))
+
+    // Lookup table to get the write mask bits based on the hasti xfer size.
+    // Note that the ddr control uses an inverted write mask, 0 means write.
+    val wmask_lut = MuxLookup(wsize, Bits(0xf), Seq(
+            UInt(0) -> Bits(0x1),
+            UInt(1) -> Bits(0x3)))
+    val wmask_shift = wmask_lut << byte_addr(1,0)
+    io.out.wr.mask := ~wmask_shift
 
     io.out.cmd.en := cmden
     io.out.cmd.instr := instr
     io.out.cmd.bl := bl
-    io.out.cmd.byte_addr := byte_addr
     io.out.wr.en := wren
     io.out.rd.en := rden
 
@@ -80,8 +93,8 @@ class HASTIDDR extends Module with HASTIConstants
         cmden := Bool(false)
         rden := Bool(false)
         when (io.in.hreadyin && io.in.hsel && (io.in.htrans === HTRANS_NONSEQ)) {
-            // Grab the address, zeroing out the two lsbs.
-            byte_addr := Cat(io.in.haddr(29, 2), UInt(0, width=2))
+            // Grab the address.
+            byte_addr := io.in.haddr
             // Keep the burst length = 1 transfer
             bl := UInt(0)
             when (io.in.hwrite) {
@@ -89,6 +102,8 @@ class HASTIDDR extends Module with HASTIConstants
                 instr := DDRINSTR_WRITE
                 // Write to the write fifo in the next cycle.
                 wren := Bool(true)
+                // Register the size of the write to generate the write mask for the write fifo.
+                wsize := io.in.hsize
                 // Go to the wait state for the transaction to complete
                 state := s_wr_wait
             }
@@ -120,7 +135,6 @@ class HASTIDDR extends Module with HASTIConstants
         // Turn off the command queue write.
         cmden := Bool(false)
         unless (io.out.rd.empty) {
-            io.in.hreadyout := Bool(true)
             rden := Bool(true)
             state := s_ready
         }
